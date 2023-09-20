@@ -1,0 +1,985 @@
+---
+title: "Medialis"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    runtime: shiny
+---
+
+
+
+```{r setup, include=FALSE}
+
+options(shiny.maxRequestSize=30*1024^2)
+library(shiny)
+library(flexdashboard)
+library(shinydashboard)
+library(readxl)
+library(FactoMineR)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(shiny)
+library(tidyverse)
+library(FactoMineR)
+library(shiny)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(shiny)
+library(readxl)
+library(ggplot2)
+library(reshape2)
+  # Define the color palette
+cols <- c("red", "blue", "green", "purple", "orange")
+
+
+```
+
+# HCP specific
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+
+```{r}
+
+shinyApp(
+  
+
+
+ui <- fluidPage(
+  # Add a light blue background color
+  tags$style(HTML("body {background-color: lightblue;}")),
+  
+  # Make the tab labels bold, change the font, and increase the font size
+  tags$head(
+    tags$style(HTML("
+      .navbar-nav a {
+        font-weight: bold;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-size: 18px;
+      }
+    "))
+  ),
+  
+  navbarPage(
+    # Add icon along with the title in the shinydashboard header
+    title <- tags$a(href='',
+                    style = "font-weight: bold; text-align: center;",
+                    icon("M"),
+                    'MEDIALIS: The Shiny App [Variation analyses]', target="_blank"),
+    
+    
+    
+    tabPanel("Upload Data",
+             fileInput("file", "Choose an Excel file"),
+             selectInput("sheet", "Choose a sheet", choices = NULL),
+             tableOutput("table")),
+    tabPanel("MCA Plot",
+             plotOutput("mcaPlot")),
+    tabPanel("Scatter Plot",
+             plotOutput("scatterPlot")),
+    tabPanel("Box Plot 1",
+             plotOutput("boxPlot1")),
+    tabPanel("Box Plot 2",
+             plotOutput("boxPlot2")),
+    tabPanel("Simulated Data",
+             actionButton("startSimulation", "Start Simulation"),
+             plotOutput("simulatedDensityPlot1"),
+             plotOutput("simulatedDensityPlot2"),
+             plotOutput("simulatedDensityPlot3")),
+    tabPanel("Simulated Data Table",
+             tableOutput("simulatedDataTable")),
+    tabPanel("Simulated Data Boxplot: Country",
+             plotOutput("simBoxPlotCountry")),
+    tabPanel("Simulated Data Boxplot: Discipline",
+             plotOutput("simBoxPlotDiscipline"))
+  )
+),
+
+
+server <- function(input, output, session) {
+  data <- reactiveVal(NULL)
+  
+  observeEvent(input$file, {
+    req(input$file)
+    sheets <- excel_sheets(input$file$datapath)
+    updateSelectInput(session, "sheet", choices = sheets)
+  })
+  
+  observeEvent(input$sheet, {
+    req(input$file)
+    req(input$sheet)
+    data(read_excel(input$file$datapath, sheet = input$sheet))
+  })
+  
+  output$table <- renderTable({
+    req(data())
+    data()
+  })
+  
+  df_mixed <- reactive({
+    req(data())
+    data() %>%
+      dplyr::select(contains("code"))
+  })
+  
+  res_mca <- reactive({
+    req(df_mixed())
+    # Check if data meets requirements for MCA
+    if (ncol(df_mixed()) < 2) {
+      stop("Data must have at least two columns for MCA")
+    }
+    
+    if (any(sapply(df_mixed(), function(x) length(unique(x))) < 2)) {
+      stop("All columns must have at least two unique values for MCA")
+    }
+    
+    # Perform MCA
+    MCA(df_mixed())
+  })
+  
+  output$mcaPlot <- renderPlot({
+    req(res_mca())
+    # Check if MCA was successful
+    if (inherits(res_mca(), "try-error")) {
+      plot.new()
+      text(0.5, 0.5, paste("Error:", as.character(res_mca())))
+      return()
+    }
+    
+    # Plot MCA results
+    plot(res_mca())
+  })
+  
+  data_with_pc <- reactive({
+    req(data())
+    req(res_mca())
+    # Check if MCA was successful
+    if (inherits(res_mca(), "try-error")) {
+      return(data())
+    }
+    
+    # Add principal component scores to data
+    data() %>%
+      mutate(
+        pc1 = res_mca()$ind$coord[, 1],
+        pc2 = res_mca()$ind$coord[, 2]
+      )
+  })
+  
+  output$scatterPlot <- renderPlot({
+    req(data_with_pc())
+    # Check if MCA was successful
+    if (inherits(res_mca(), "try-error")) {
+      plot.new()
+      text(0.5, 0.5, paste("Error:", as.character(res_mca())))
+      return()
+    }
+    
+    # Create scatter plot
+    ggplot(data_with_pc(), aes(x = pc1, y = pc2, color = Discipline)) +
+      geom_point() +
+      stat_ellipse()
+  })
+  
+  data_with_difference <- reactive({
+    req(data_with_pc())
+    # Check if MCA was successful
+    if (inherits(res_mca(), "try-error")) {
+      return(data())
+    }
+    
+    # Calculate difference between first two principal components
+    data_with_pc() %>%
+      mutate(Difference_PC = pc1 - pc2)
+  })
+  
+  add_p_value <- function(p, formula, sim_data_df) {
+    kruskal_res <- kruskal.test(formula, data = sim_data_df)
+    p_value <- kruskal_res$p.value
+    p_value_formatted <- format(p_value, digits = 3)
+    y_coord <- max(sim_data_df$Difference_PC) + 1
+    p + annotate("text", x = 4, y = y_coord, label = paste("Kruskal-Wallis test: P-value =", p_value_formatted))
+  }
+  
+  output$boxPlot1 <- renderPlot({
+    req(data_with_difference())
+    # Check if MCA was successful
+    if (inherits(res_mca(), "try-error")) {
+      plot.new()
+      text(0.5, 0.5, paste("Error:", as.character(res_mca())))
+      return()
+    }
+    
+    # Create box plot
+    p <- ggboxplot(data_with_difference(), x = "Discipline", y = "Difference_PC",
+                   color = "Discipline", palette = "jco",
+                   add = "jitter")
+    
+    # Add p-value to plot
+    p_sim_boxplot_discipline <- add_p_value(p, Difference_PC ~ Discipline, data_with_difference())
+    
+    print(p_sim_boxplot_discipline)  # Note that we need to print the plot explicitly
+  })
+  
+  output$boxPlot2 <- renderPlot({
+    req(data_with_difference())
+    # Check if MCA was successful
+    if (inherits(res_mca(), "try-error")) {
+      plot.new()
+      text(0.5, 0.5, paste("Error:", as.character(res_mca())))
+      return()
+    }
+    
+    # Create box plot
+    p <- ggboxplot(data_with_difference(), x = "Country", y = "Difference_PC",
+                   color = "Country", palette = "jco",
+                   add = "jitter")
+    
+    # Add p-value to plot
+    p_sim_boxplot_country <- add_p_value(p, Difference_PC ~ Country, data_with_difference())
+    
+    print(p_sim_boxplot_country)  # Note that we need to print the plot explicitly
+  })
+  
+  # Simulation function without mean imputation
+  run_simulation <- eventReactive(input$startSimulation, {
+    req(data())
+    req(res_mca())
+    
+    n_sim <- 1000
+    
+    sim_data <- replicate(n_sim, {
+      Discipline_sim <- sample(data()$Discipline, size = nrow(data()), replace = TRUE)
+      Country_sim <- sample(data()$Country, size = nrow(data()), replace = TRUE)
+      pc1_sim <- rnorm(nrow(data()), mean = mean(res_mca()$ind$coord[, 1]), sd = sd(res_mca()$ind$coord[, 1]))
+      pc2_sim <- rnorm(nrow(data()), mean = mean(res_mca()$ind$coord[, 2]), sd = sd(res_mca()$ind$coord[, 2]))
+      
+      sim_df <- data.frame(Discipline = Discipline_sim,
+                           Country = Country_sim,
+                           pc1 = pc1_sim,
+                           pc2 = pc2_sim)
+      
+      sim_df
+    }, simplify = FALSE)
+    
+    sim_data_df <- do.call(rbind, sim_data)
+    sim_data_df$sim_id <- rep(seq_len(n_sim), each = nrow(data()))
+    sim_data_df$Difference_PC <- sim_data_df$pc1 - sim_data_df$pc2
+    
+    sim_data_df
+  })
+  
+  # Create simulated data density plots
+  output$simulatedDensityPlot1 <- renderPlot({
+    req(input$startSimulation)
+    sim_data <- run_simulation()
+    
+    p1 <- ggplot(sim_data, aes(x = Difference_PC, colour = Country)) +
+      geom_density(lwd = 1.2, linetype = 1) + 
+      scale_color_manual(values = cols) +
+      xlab("Simulated Difference") +
+      ylab("Density")
+    
+    print(p1)
+  })
+  
+  output$simulatedDensityPlot2 <- renderPlot({
+    req(input$startSimulation)
+    sim_data <- run_simulation()
+    
+    p2 <- ggplot(sim_data, aes(x = pc1, colour = Country)) +
+      geom_density(lwd = 1.2, linetype = 1) + 
+      scale_color_manual(values = cols) +
+      xlab("Simulated PC1") +
+      ylab("Density")
+    
+    print(p2)
+  })
+  
+  output$simulatedDensityPlot3 <- renderPlot({
+    req(input$startSimulation)
+    sim_data <- run_simulation()
+    
+    p3 <- ggplot(sim_data, aes(x = pc2, colour = Country)) +
+      geom_density(lwd = 1.2, linetype = 1) + 
+      scale_color_manual(values = cols) +
+      xlab("Simulated PC2") +
+      ylab("Density")
+    
+    print(p3)
+  })
+  
+  output$simulatedDataTable <- renderTable({
+    req(input$startSimulation)
+    sim_data <- run_simulation()
+    sim_data
+  })
+  
+  # Create box plot for simulated data: Country
+  output$simBoxPlotCountry <- renderPlot({
+    req(input$startSimulation)
+    sim_data <- run_simulation()
+    
+    # Create box plot
+    p <- ggboxplot(sim_data, x = "Country", y = "Difference_PC",
+                   color = "Country", palette = "jco",
+                   add = "jitter")
+    
+    # Add p-value to plot
+    p_sim_boxplot_country <- add_p_value(p, Difference_PC ~ Country, sim_data)
+    
+    print(p_sim_boxplot_country)  # Note that we need to print the plot explicitly
+  })
+  
+  # Create box plot for simulated data: Discipline
+  output$simBoxPlotDiscipline <- renderPlot({
+    req(input$startSimulation)
+    sim_data <- run_simulation()
+    
+    # Create box plot
+    p <- ggboxplot(sim_data, x = "Discipline", y = "Difference_PC",
+                   color = "Discipline", palette = "jco",
+                   add = "jitter")
+    
+    # Add p-value to plot
+    p_sim_boxplot_discipline <- add_p_value(p, Difference_PC ~ Discipline, sim_data)
+    
+    print(p_sim_boxplot_discipline)  # Note that we need to print the plot explicitly
+  })
+},
+  
+
+options=list(height=1000, weight="100%")
+  
+)
+
+
+```
+
+
+# Item specific
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+
+```{r}
+
+shinyApp(
+  ui <- fluidPage(
+  # Make the tab labels bold, change the font, and increase the font size
+  tags$head(
+    tags$style(HTML("
+      .navbar-nav a {
+        font-weight: bold;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-size: 18px;
+      }
+    "))
+  ),
+  
+  titlePanel("Medialis Shiny App: Variation analyses"),
+  # Add a light blue background color
+  tags$style(HTML("body {background-color: lightblue;}")),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file", "Choose File"),
+      selectInput("sheet", "Choose Sheet", choices = NULL),
+      actionButton("start", "Start Analysis"),
+      # Add a dropdown to select the reference country
+      selectInput("reference_country", "Choose Reference Country", choices = NULL)
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Plot", 
+                 plotOutput("mcaPlot"),
+                 downloadButton("downloadPlot", "Download Plot")
+        ),
+        tabPanel("Descriptive Statistics", 
+                 tableOutput("stats"),
+                 downloadButton("downloadStats", "Download Statistics")
+        ),
+        tabPanel("Analysis Data", 
+                 tableOutput("data_table"),
+                 downloadButton("downloadData", "Download Analysis Data")
+        ),
+        # New tab panel for "Reference Selection" p-values
+        tabPanel("Reference Selection",
+                 tableOutput("p_values_table"),
+                 downloadButton("downloadPValues", "Download P-Values")
+        )
+      )
+    )
+  )
+),
+
+server <- function(input, output, session) {
+  observeEvent(input$file, {
+    updateSelectInput(session, "sheet", choices = excel_sheets(input$file$datapath))
+  })
+  
+  # Populate the reference country dropdown based on the available countries
+  observeEvent(input$start, {
+    req(input$file)
+    req(input$sheet)
+    data <- read_excel(input$file$datapath, sheet = input$sheet)
+    countries <- c("UK", "Belgium", "France", "Germany", "Italy")
+    updateSelectInput(session, "reference_country", choices = countries)
+  })
+  
+  data_list <- eventReactive(input$start, {
+    req(input$file)
+    req(input$sheet)
+    
+    # Read in selected sheet and store it in a list
+    data_list <- list(read_excel(input$file$datapath, sheet = input$sheet))
+    
+    # Assign name to the list element
+    names(data_list) <- input$sheet
+    
+    # Function to perform MCA and extract principal components for a specific country
+    perform_mca <- function(df, country) {
+      df_country <- df %>% dplyr::select(dplyr::contains(country))
+      res_mca <- PCA(df_country)
+      return(res_mca$ind$coord[, 1:2])
+    }
+    
+    # Loop through countries and perform MCA, calculate differences, and store results in data_list
+    countries <- c("UK", "Belgium", "France", "Germany", "Italy")
+    for (country in countries) {
+      pcs <- perform_mca(data_list[[input$sheet]], country)
+      data_list[[input$sheet]][[paste0(country, "_pc1")]] <- pcs[, 1]
+      data_list[[input$sheet]][[paste0(country, "_pc2")]] <- pcs[, 2]
+      data_list[[input$sheet]][[paste0(country, "_Difference")]] <- pcs[, 1] - pcs[, 2]
+    }
+    
+    # Function to perform Wilcoxon test and get p-value
+    perform_wilcox_test <- function(data1, data2) {
+      return(wilcox.test(data1, data2, paired = TRUE)$p.value)
+    }
+    
+    # Loop through countries and calculate Wilcoxon test p-values using the selected reference country
+    reference_country <- input$reference_country
+    if (is.null(reference_country)) {
+      reference_country <- "UK"  # Default reference country is UK if not selected
+    }
+    uk_data <- data_list[[input$sheet]][[paste0(reference_country, "_Difference")]]
+    p_values <- list()
+    for (country in countries[-which(countries == reference_country)]) {
+      country_data <- data_list[[input$sheet]][[paste0(country, "_Difference")]]
+      p_values[[paste0(reference_country, "_vs_", country)]] <- perform_wilcox_test(uk_data, country_data)
+    }
+    
+    # Format p-values
+    p_value_formatted <- formatC(unlist(p_values), format = "f", digits = 3)
+    
+    # Create plot
+    long_data <- data_list[[input$sheet]] %>%
+      dplyr::select(dplyr::contains("_Difference")) %>%
+      pivot_longer(cols = everything(), names_to = "Country_Name", values_to = "Difference_Value") %>%
+      mutate(Country_Name = gsub("_Difference", "", Country_Name))
+    
+    p <- ggplot(long_data, aes(x = Country_Name, y = Difference_Value, fill = Country_Name)) +
+      geom_boxplot() + geom_jitter(width = 0.2) +
+      geom_hline(yintercept = 0, linetype = "dashed") +
+      labs(x = "Country", y = "Variation value") +
+      scale_fill_discrete(name = "Country") +
+      theme_bw() +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+      scale_y_continuous(limits = c(-10, 10), breaks = seq(-10, 10, by = 2))
+    
+    return(list(p = p, p_values = p_values, long_data = long_data, analysis_data = data_list[[input$sheet]]))
+  })
+  
+  output$mcaPlot <- renderPlot({
+    req(data_list())
+    data_list()$p
+  })
+  
+  output$stats <- renderTable({
+    req(data_list())
+    data_list()$long_data %>%
+      group_by(Country_Name) %>%
+      dplyr::summarize(Median = median(Difference_Value),
+                       `25th Percentile` = quantile(Difference_Value, 0.25),
+                       `75th Percentile` = quantile(Difference_Value, 0.75)) %>%
+      ungroup()
+  })
+  
+  output$data_table <- renderTable({
+    req(data_list())
+    data_list()$analysis_data
+  })
+  
+  # Render the table of p-values in "Reference Selection" tab
+  output$p_values_table <- renderTable({
+    req(data_list())
+    p_values <- data_list()$p_values
+    reference_country <- input$reference_country
+    if (is.null(reference_country)) {
+      reference_country <- "UK"  # Default reference country is UK if not selected
+    }
+    data.frame(Country = names(p_values), P_Value = unlist(p_values), Reference_Country = reference_country)
+  })
+  
+  # Download plot
+  output$downloadPlot <- downloadHandler(
+    filename = function() {
+      paste(input$sheet, "_MCA_Plot.png", sep = "")
+    },
+    content = function(file) {
+      ggsave(file, data_list()$p)
+    }
+  )
+  
+  output$downloadStats <- downloadHandler(
+    filename = function() {
+      paste(input$sheet, "_Descriptive_Statistics.csv", sep = "")
+    },
+    content = function(file) {
+      write.csv(data_list()$long_data %>%
+                  group_by(Country_Name) %>%
+                  dplyr::summarize(Median = median(Difference_Value),
+                                   `25th Percentile` = quantile(Difference_Value, 0.25),
+                                   `75th Percentile` = quantile(Difference_Value, 0.75)) %>%
+                  ungroup(), file)
+    }
+  )
+  
+  output$downloadData <- downloadHandler(
+    filename = function() {
+      paste(input$sheet, "_Analysis_Data.csv", sep = "")
+    },
+    content = function(file) {
+      write.csv(data_list()$analysis_data, file)
+    }
+  )
+  
+  # Download p-values table
+  output$downloadPValues <- downloadHandler(
+    filename = function() {
+      paste(input$sheet, "_P_Values.csv", sep = "")
+    },
+    content = function(file) {
+      p_values_table <- data.frame(Country = names(data_list()$p_values), P_Value = unlist(data_list()$p_values))
+      write.csv(p_values_table, file)
+    }
+  )
+},
+
+
+options=list(height=1000, weight="100%")
+  
+)
+
+
+```
+
+
+
+# Neutrality Modelling
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+
+```{r}
+
+Perform_sims <- function(SummDat, prevalence, values){ 
+  # Perform_sims <- function(D, prevalence, values){ 
+  
+  
+  # Number of simulations
+  n_sim <- 1000
+  
+  P_Res <- list()
+  length(P_Res) <- length(prevalence)
+  
+  n_P_Res <- list()
+  length(n_P_Res) <- length(prevalence) 
+  
+  # Loop over different prevalence of the disease  
+  for(k in 1:3) {
+    # Prevalence of severe disease 
+    P <- prevalence[k]
+    
+    # Number of Papers for the disease
+    nR <- nrow(SummDat) 
+    # NoP <- 10 # Test code 
+    
+    # Results: design (overlap, missing, etc.,), accuracy (S, C) and misclassification (FN, FP) 
+    Res <- matrix(" ", ncol=4, nrow=nR) 
+    # The same Results matrix for numbers 
+    # n_Res <- matrix(0, ncol=12, nrow=nR) 
+    n_Res <- array(0,  dim=c(n_sim, nR, 2)) 
+    
+    
+    # loop over each row in the dataset
+    for (j in 1:nR) {
+      
+      # set seed for reproducibility 
+      set.seed(42) 
+      
+      #-----------------# 
+      # PARAMETERS 
+      #-----------------# 
+      
+      # Extract the row "j" data 
+      # Sensitivity and Specificity 
+      S = SummDat[j,"S"]
+      C = SummDat[j,"C"]
+      
+      # sample size 
+      n = SummDat[j,"N_P"] 
+      
+      # Initalized temporary storage for storing simulation results  
+      #    Sim_Mat <- matrix(0, ncol=6, nrow=nsim)
+      # intializing false postives and negatives
+      PFP = numeric(n_sim) 
+      PFN = numeric(n_sim)
+      
+      
+      for(i in 1:n_sim){ 
+        
+        # Drawing a sample from a population with fixed prevalence 
+        D1 = rbinom(1, n, P) # number of severe cases in a sample of size n
+        D0 = n - D1 # number of non-severe cases in the sample
+        
+        # Drawing the test results for the sample with disease severity (D+) 
+        # number of those indicated as severe by the design among those whow are severe
+        k1 = rbinom(1, D1, S) # number of true positives
+        m1 = D1 - k1 # number false negatives
+        
+        # Drawing the test results for the sample without disease severity (D-) 
+        k0 = rbinom(1, D0, C) # number of true negatives 
+        m0 = D0 - k0 # number of false positives
+        
+        # total tested postive 
+        tot_p = k1 + m0 
+        tot_n = k0 + m1
+        
+        # misclassification
+        pfp = m0 / tot_p # prop. of false postivies 
+        pfn = m1 / tot_n 
+        
+        PFP[i] = pfp
+        PFN[i] = pfn 
+        
+        rm(pfp, pfn, D0, D1, k1, k0, m1, m0) 
+        
+        # print(i)
+        
+      }  # end j-loop: over n_sim simulations
+      
+      qfn <- quantile(PFN, c(0.5, 0.05, 0.95), na.rm = TRUE)
+      qfp <- quantile(PFP, c(0.5, 0.05, 0.95), na.rm = TRUE)
+      
+      # misclassification
+      misclass <- c(sprintf("%.2f (%.2f, %.2f)", qfn[1], qfn[2], qfn[3]), 
+                    sprintf("%.2f (%.2f, %.2f)", qfp[1], qfp[2], qfp[3]))
+      
+      # accuracy: Neutrality (Sensitivity, Specificity)
+      accur <- sprintf("%.2f (%.2f, %.2f)", (S+C), S, C)  
+      
+      # design = (Overlap, redundant, miss, irrelevant)
+      des = paste0("(", SummDat$X1[j], ", ", SummDat$X2[j], ", ", (SummDat$a[j] - SummDat$X1[j]), ", ", (SummDat$b[j] - SummDat$X2[j]), ")") 
+      Res[j,] = c(des, accur, misclass)
+      
+      # n_misclass = c(qfn[1], qfn[2], qfn[3], qfp[1], qfp[2], qfp[3])
+      # n_accur = c(S, C) 
+      # n_des = c(SummDat$X1[j], SummDat$X2[j], (SummDat$a[j] - SummDat$X1[j]), (SummDat$b[j] - SummDat$X2[j]))
+      # n_Res[j,] = c(n_des, n_accur, n_misclass)
+      n_Res[,j,1] = PFP 
+      n_Res[,j,2] = PFN 
+      
+      rm(S, C)
+      
+    } # end j-loop: over data rows
+    
+    P_Res[[k]] <- Res 
+    n_P_Res[[k]] <- n_Res 
+    
+  } # end k-loop: over prevalence
+  
+  if(values=="FALSE") { return(P_Res) }
+  if(values=="TRUE") { return(n_P_Res) }
+  
+} # end of function
+
+
+
+shinyApp(
+  ui <- fluidPage(
+  # # Add icon along with the title in the shinydashboard header
+  title <- tags$a(href='',
+                  style = "font-weight: bold; text-align: center;",
+                  icon("M"),
+                  'MEDIALIS: Neutrality Modelling', target="_blank"),
+  br(),
+  
+
+  # Sidebar with sliders and table
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput("sensitivity1", "Sensitivity 1:", min = 0, max = 1, value = 0.3889, step = 0.01),
+      sliderInput("sensitivity2", "Sensitivity 2:", min = 0, max = 1, value = 0.3485, step = 0.01),
+      sliderInput("specificity1", "Specificity 1:", min = 0, max = 1, value = 1.0, step = 0.01),
+      sliderInput("specificity2", "Specificity 2:", min = 0, max = 1, value = 0.50, step = 0.01),
+      sliderInput("samplesize1", "Sample Size 1:", min = 1, max = 1000, value = 92, step = 1),
+      sliderInput("samplesize2", "Sample Size 2:", min = 1, max = 1000, value = 92, step = 1),
+      numericInput("overlap1", "Overlap (a) for row 1:", value=14),
+      numericInput("overlap2", "Overlap (a) for row 2:", value=23),
+      numericInput("redundant1", "Redundant (b) for row 1:", value=22),
+      numericInput("redundant2", "Redundant (b) for row 2:", value=13),
+      numericInput("severe_cases1", "Total severe cases (a) for row 1:", value=14),
+      numericInput("severe_cases2", "Total severe cases (a) for row 2:", value=66),
+      numericInput("non_severe_cases1", "Total non-severe cases (c) for row 1:", value=78),
+      numericInput("non_severe_cases2", "Total non-severe cases (c) for row 2:", value=26),
+      sliderInput("prevalence1", "Prevalence Value #1:", min=0, max=1, value=0.20, step=0.01),
+      sliderInput("prevalence2", "Prevalence Value #2:", min=0, max=1, value=0.50, step=0.01),
+      sliderInput("prevalence3", "Prevalence Value #3:", min=0, max=1, value=0.80, step=0.01)
+    ),
+    
+    # Show plots and summary data
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Plots", plotOutput("plots")),
+        tabPanel("Summary Data", tableOutput("summary"))
+      )
+    )
+    
+  )
+),
+
+
+
+
+# Define server logic
+server <- function(input,output){
+  
+  # Create the new dataset
+  SummDat <- reactive({
+    data.frame(
+      S=c(input$sensitivity1,input$sensitivity2), # Sensitivity values
+      C=c(input$specificity1,input$specificity2), # Specificity values
+      N_P=c(input$samplesize1,input$samplesize2), # Sample sizes
+      X1=c(input$overlap1,input$overlap2), # Overlap values (a)
+      X2=c(input$redundant1,input$redundant2), # Redundant values (b)
+      a=c(input$severe_cases1,input$severe_cases2), # Total severe cases (a)
+      b=c(input$non_severe_cases1,input$non_severe_cases2) # Total non-severe cases (c)
+    )
+  })
+  
+  # Define prevalence values
+  prevalence <- reactive({
+    c(input$prevalence1,input$prevalence2,input$prevalence3)
+  })
+  
+  # Call Perform_sims function
+  results <- reactive({
+    Perform_sims(SummDat(), prevalence() ,values="TRUE")
+  })
+  
+  # Combine results into a data frame for plotting
+  plot_data <- reactive({
+    data.frame() %>%
+      {
+        for(k in seq_along(prevalence())){
+          for(j in seq_len(nrow(SummDat()))){
+            temp <- data.frame(
+              Prevalence=rep(prevalence()[k],nrow(results()[[k]][ ,j ,])),
+              FalsePositives=results()[[k]][ ,j ,1],
+              FalseNegatives=results()[[k]][ ,j ,2],
+              Scenario=rep(ifelse(j==1,"Min","Max"),nrow(results()[[k]][ ,j ,]))
+            )
+            . <- rbind(. ,temp)
+          }
+        }
+        .
+      }
+  })
+  
+  # Summarize data
+  summary_data <- reactive({
+    plot_data() %>%
+      group_by(Prevalence ,Scenario) %>%
+      summarize(
+        FalsePositives_median=median(FalsePositives),
+        FalsePositives_25th=quantile(FalsePositives ,0.25, na.rm = TRUE),
+        FalsePositives_75th=quantile(FalsePositives ,0.75, na.rm = TRUE),
+        FalseNegatives_median=median(FalseNegatives),
+        FalseNegatives_25th=quantile(FalseNegatives ,0.25, na.rm = TRUE),
+        FalseNegatives_75th=quantile(FalseNegatives ,0.75, na.rm = TRUE)
+      )
+  })
+  
+  # Create the first plot: Comparison of min and max false negative rates vs false positive rates
+  plot1 <- reactive({
+    ggplot(plot_data(), aes(x=Scenario ,y=FalseNegatives ,fill=Scenario)) +
+      geom_boxplot() +
+      facet_wrap(~Prevalence ,ncol=3) +
+      labs(x="Scenario" ,y="False Negatives" ,fill="Scenario") +
+      theme_minimal() +
+      ggtitle("Comparison of Min and Max False Negative Rates") +
+      scale_x_discrete(labels=c("Min"="Minimum" ,"Max"="Maximum"))
+  })
+  
+  # Create the second plot: Comparison of min and max false positive rates vs false positive rates
+  plot2 <- reactive({
+    ggplot(plot_data(), aes(x=Scenario ,y=FalsePositives ,fill=Scenario)) +
+      geom_boxplot() +
+      facet_wrap(~Prevalence ,ncol=3) +
+      labs(x="Scenario" ,y="False Positives" ,fill="Scenario") +
+      theme_minimal() +
+      ggtitle("Comparison of Min and Max False Positive Rates") +
+      scale_x_discrete(labels=c("Min"="Minimum" ,"Max"="Maximum"))
+  })
+  
+  output$plots <- renderPlot({
+    grid.arrange(plot1(), plot2(), ncol=2)
+  })
+  
+  output$summary <- renderTable({
+    summary_data()
+  })
+},
+
+  options=list(height=1000, weight="100%")
+  
+)
+
+
+```
+
+
+# Heatmap plot CR1
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+
+
+```{r}
+
+library(shiny)
+library(gplots)
+
+ui <- fluidPage(
+  titlePanel("Barcode Graph"),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file", "Upload Data", accept = c(".RData", ".csv")),
+      actionButton("plot", "Plot Graph")
+    ),
+    mainPanel(
+      plotOutput("barcode")
+    )
+  )
+)
+
+server <- function(input, output) {
+  data <- reactiveVal()
+  
+  observeEvent(input$file, {
+    # Check file format
+    if (grepl("\\.RData$", input$file$name)) {
+      # Load data from .RData file
+      data(load(input$file$datapath))
+    } else if (grepl("\\.csv$", input$file$name)) {
+      # Read data from .csv file
+      data(read.csv(input$file$datapath))
+    }
+  })
+  
+  output$barcode <- renderPlot({
+    req(data())
+    
+    # Convert data to matrix
+    data_matrix <- as.matrix(data())
+    
+    # Ensure all values are numeric
+    data_matrix <- apply(data_matrix, 2, as.numeric)
+    
+    col = c("white","#70AD47","#C6E0B4","#FFD966","#00B0F0","#008080","grey","#FFFFF0")
+    
+    layout(matrix(c(1,2), nrow = 1), widths=c(4/5, 1/5))
+    
+    heatmap.2(data_matrix,col=col,
+              Rowv=FALSE,dendrogram='none',
+              Colv=FALSE,vline=0,
+              cexRow=1,cexCol=1,srtCol=45,
+              ylab="Item Number",
+              sepwidth=c(0.0001),sepcolor="grey",
+              colsep=1:ncol(data()),rowsep=1:nrow(data()))
+    
+    par(mar=c(0,0,0,0))
+    
+    legend(x="top",
+           legend=c("Not suggested",
+                    "Complete consensus (CI=1.00)",
+                    "Consensus+ (CI>0.50)",
+                    "Consensus? (CI>=50>CI>0)",
+                    "Unique to SH group",
+                    "Homo",
+                    "Hetero",
+                    "N/A"),
+           fill=col,cex=0.70,bg="transparent")
+  })
+}
+
+shinyApp(ui, server)
+
+
+
+
+```
+
+
+
+# Guidance Doc
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+
+**Statistical methods reporting for manuscript:**
+
+In this analysis, we used data from an Excel file to explore the distribution of observations by Discipline and Country. We created pie charts to visualize the proportion of observations in each group and calculated frequency and percentage tables to summarize the data.
+
+Next, we performed multiple correspondence analysis (MCA) on columns containing “code” string variables to explore the relationships between these categorical variables. MCA is a multivariate statistical technique used to analyze the patterns of association between categorical variables. We extracted the principal component scores for the first two components and created a scatter plot to visualize the individuals on these components.
+
+We then calculated the difference between the first two principal components and performed descriptive analysis by Discipline and Country. We calculated the median and interquartile range (25th and 75th percentiles) for the Difference_PC variable within each group and created box plots to compare the distribution of this difference by Discipline and Country. We used the Kruskal-Wallis test to assess whether there were significant differences in the distribution of the difference between groups.
+
+Next, we performed a simulation study to generate new data based on the observed data. We simulated n_sim new data sets by sampling from normal distributions for the continuous variables (codes, pc1, and pc2) and by randomly sampling with replacement from the observed data for the categorical variables (Discipline and Country). We then combined the simulated data sets into a single data frame and calculated the difference between the first two principal components (pc1 and pc2) for each simulated observation.
+
+We created density plots to visualize the distribution of the simulated Difference_PC, pc1, and pc2 variables by Country. We also created box plots to compare the distribution of the simulated Difference_PC variable by Discipline and Country. We used the Kruskal-Wallis test to assess whether there were significant differences in the distribution of the simulated difference between groups.
+
+To cite R in publications use:
+R Core Team (2023). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria.
+ URL https://www.R-project.org/.
+Packages used for analys:
+readxl
+tidyverse
+rstatix
+FactoMineR
+gridExtra
+
+
+
+
+
+
+
+
+
+
